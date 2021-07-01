@@ -1,0 +1,89 @@
+args <- commandArgs(trailingOnly = TRUE)
+famfile <- args[1]
+phenofile <- args[2]
+covfile <- args[3]
+genofile <- args[4]
+genofile_path <- args[5]
+outfile <- args[6]
+phenoname <- args[7]
+min_level <- args[8]
+
+#Right now: assuming covariates C1-C5 are used, pheno is coded such that minimum score is 0
+#Model will give false positives for monomorphic markers, some filtering must be applied!
+
+ #Load libraries
+  library(data.table)
+  library(MASS)
+  library(fastglm)
+
+
+
+#  Example data: comment out when running a real GWAS
+#  famfile='dos_pts_mrsc_mix_am-qc.hg19.ch.fl.chr15_093_103.out.dosage.fam'
+#  phenofile='1_MRSC_C_V2_2.5_PCL4.txt'
+#  covfile='pts_mrsc_mix_am-qc-eur_pca.menv.mds_cov'
+#  genofile='dos_pts_mrsc_mix_am-qc.hg19.ch.fl.chr22_016_039.out.dosage.doscnt.gz'
+#  genofile_path='genotypes'
+#  phenoname='pcl4_c_12_future'
+#  outfile='dos_pts_mrsc_mix_am-qc.hg19.ch.fl.chr22_016_039.out.dosage.doscnt.gz.results.txt'
+#  min_level=1
+
+
+ #Load famfile
+  fam <- read.table(famfile,header=F,na.strings=c("NA","-9")) #PLINK phenotype
+
+  names(fam) <- c("FID","IID","F","M","G","P")
+ #Make a variable to index subjects, because this data will be merged with phenotype data and cause data to be resorted
+  fam$order <- c(1:nrow(fam))
+
+ #Load phenotypes.
+  pheno <- read.table(phenofile,header=T,na.strings=c("NA","-9")) #PLINK phenotype
+  #If the phenotype ranges from 0-4, you MUST make sure the mininum value is 0!
+
+ #Load covariates
+  covar <- read.table(covfile,header=T,na.strings=c("NA","-9")) #PLINK phenotype
+
+ #Notice that all.x=T, because the family file length must be preserved!
+  d1 <- merge(fam,pheno,by=c("FID","IID"),all.x=T,suffixes=c("_fam",""))
+  dm0 <- merge(d1,covar,by=c("FID","IID"),all.x=T,suffixes=c("_cov",""))
+  dm <- dm0[order(dm0$order),] #This will order the data according to the geotypes
+  dm$pheno <- dm[,phenoname] - min_level   #Make generic column 'pheno' that takes the data of the phenotype
+    #Assuming that the phenotype is coded as 0
+
+ #Load (stream?) genotypes. Currently a CSV file where columns 1,2,3 are rsID, A1, and A2. Map file is therefore optional. Possibly just stack into this file intiially!!
+  genotypes <- fread(paste('zcat ', genofile_path,'/', genofile,sep=''),data.table=F,sep=",")[-1,] #remove row 1: that is just going to be SNP A1 A2... columns
+
+ #Remove genotypes and data with missing phenotype or PCs
+  remove <- is.na(dm$pcl4_c_12_future) | is.na(dm$C1)
+  dm2 <- dm[!remove,]
+
+  genotypes_rs <- genotypes[,c(1:3)] #SNP A1 A2 columns
+  genotypes <-  as.matrix(genotypes[,-c(1:3)][,!remove]) #note, because the indexing for 'remove' is based on the famfile, which has no extra columns, must remove columns 1-3 in the genotype matrix to align indexing
+  row.names(genotypes) <- genotypes_rs[,1]
+
+
+ #Make covariate matrix
+  covmat <- model.matrix(~C1+C2+C3+C4+C5,data=dm2)
+
+ #Get estimate for theta assuming null genetic effect
+  theta_baseline <- summary(glm.nb(pheno ~  C1 + C2 + C3 +C4+C5,data=dm2))$theta
+
+#apply function right now, could also do some splitting based approach
+
+  nbglm <- function(genovector,datamatrix,theta)
+  {
+   m <- fastglm(cbind(genovector,datamatrix),dm2$pheno, ,family=negative.binomial(theta),method=3)
+    #it's faster to save the variable and concatenate the relevant stuff than to use SUMMARY
+   c(m$coefficients,m$se)
+  }
+
+  #everycolumn is a SNP. Results are reported as estimate, SE, tvalue, and pr>t.Currently genovector,
+  results <- t(apply(genotypes,1,nbglm,datamatrix=covmat,theta=theta_baseline))
+
+  zvalues <- results[,1]/results[,8] #this indexing method is dangerous and needs fixing
+  pvalues <- 2*pnorm(abs(zvalues),lower.tail=F)
+
+  total_results <- cbind(genotypes_rs,results[,c(1,8)],zvalues,pvalues)
+  names(total_results) <- c("SNP","A1","A2","Beta","SE","Z","P")
+
+  write.table(total_results,file=paste(outfile,'/',phenoname,'.',genofile,'.txt',sep=''),quote=F,row.names=F)

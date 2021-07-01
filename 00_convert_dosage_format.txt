@@ -1,0 +1,17 @@
+#Convert dosage data to a usable format, a la how it is performed for GEMMA
+
+#Assumes a 2 column probably format (i.e. Homozygote coded allele, heterozygote)
+
+#User: Set location of input dosages data
+ dosage_file_dir=qc1
+
+#User: Set location of output dosages
+ outdir=adam_dosage
+
+for file_use in $(ls $dosage_file_dir | grep gz | grep -v fini )
+do
+ file_use_fam=$(echo $file_use | sed 's/.gz//g')
+ echo $file_use
+ nsub=$(wc -l "$dosage_file_dir"/"$file_use_fam".fam | awk '{print $1}')
+ zcat "$dosage_file_dir"/"$file_use" | awk -v s=$nsub '{ printf $1 "," $2 "," $3; for(i=1; i<=s; i++) printf "," $(i*2+2)*2+$(i*2+3); printf "\n" }' | gzip > "$outdir"/"$file_use_fam".doscnt.gz
+done
